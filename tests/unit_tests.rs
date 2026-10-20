@@ -70,3 +70,9 @@ fn zeroize_clears_secret_material() {
     );
     assert_eq!(sk1.as_bytes(), &[0u8; 32]);
 }
+
+#[test]
+fn signing_key_is_zeroize_on_drop() {
+    fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    assert_zeroize_on_drop::<SigningKey>();
+}

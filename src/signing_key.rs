@@ -133,6 +133,14 @@ impl zeroize::Zeroize for SigningKey {
     }
 }
 
+impl Drop for SigningKey {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(self)
+    }
+}
+
+impl zeroize::ZeroizeOnDrop for SigningKey {}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct SerdeHelper([u8; 32]);
 
