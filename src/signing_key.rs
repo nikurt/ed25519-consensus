@@ -146,6 +146,8 @@ impl Drop for WipingSha512 {
     }
 }
 
+impl zeroize::ZeroizeOnDrop for WipingSha512 {}
+
 impl zeroize::Zeroize for SigningKey {
     fn zeroize(&mut self) {
         self.seed.zeroize();
@@ -170,6 +172,8 @@ impl Drop for SerdeHelper {
         self.0.zeroize()
     }
 }
+
+impl zeroize::ZeroizeOnDrop for SerdeHelper {}
 
 impl From<SerdeHelper> for SigningKey {
     fn from(helper: SerdeHelper) -> SigningKey {
@@ -249,6 +253,15 @@ mod tests {
         // SAFETY: `write` initialised the slot, and it is never read as a `T` afterwards.
         unsafe { slot.assume_init_drop() };
         (before, holds(&slot))
+    }
+
+    fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+    #[test]
+    fn test_secret_helpers_are_zeroize_on_drop() {
+        assert_zeroize_on_drop::<SigningKey>();
+        assert_zeroize_on_drop::<WipingSha512>();
+        assert_zeroize_on_drop::<SerdeHelper>();
     }
 
     #[test]
