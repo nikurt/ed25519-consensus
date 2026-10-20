@@ -51,3 +51,22 @@ fn sign_and_verify() {
 
     assert_eq!(pk.verify(&sig, &msg[..]), Ok(()))
 }
+
+#[test]
+fn zeroize_clears_secret_material() {
+    use zeroize::Zeroize;
+
+    let mut sk1 = SigningKey::new(thread_rng());
+    let mut sk2 = SigningKey::new(thread_rng());
+    sk1.zeroize();
+    sk2.zeroize();
+
+    // With the scalar and the nonce prefix both zeroed, a signature depends only on the
+    // message, so two distinct zeroized keys must produce the same signature.
+    let msg = b"ed25519-consensus zeroize test message";
+    assert_eq!(
+        <[u8; 64]>::from(sk1.sign(msg)),
+        <[u8; 64]>::from(sk2.sign(msg))
+    );
+    assert_eq!(sk1.as_bytes(), &[0u8; 32]);
+}
