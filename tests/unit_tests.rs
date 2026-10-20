@@ -76,3 +76,24 @@ fn signing_key_is_zeroize_on_drop() {
     fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
     assert_zeroize_on_drop::<SigningKey>();
 }
+
+#[test]
+fn debug_does_not_render_secrets() {
+    use sha2::{Digest, Sha512};
+
+    let seed = [7u8; 32];
+    let sk = SigningKey::from(seed);
+    let expanded = Sha512::digest(&seed[..]);
+    let mut scalar = [0u8; 32];
+    scalar.copy_from_slice(&expanded[..32]);
+    scalar[0] &= 248;
+    scalar[31] &= 127;
+    scalar[31] |= 64;
+
+    for output in [format!("{:?}", sk), format!("{:#?}", sk)] {
+        for secret in [&seed[..], &scalar[..], &expanded[32..]] {
+            assert!(!output.contains(&hex::encode(secret)), "{}", output);
+            assert!(!output.contains(&format!("{:?}", secret)), "{}", output);
+        }
+    }
+}
