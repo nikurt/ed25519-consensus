@@ -164,7 +164,7 @@ impl Drop for SigningKey {
 
 impl zeroize::ZeroizeOnDrop for SigningKey {}
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 struct SerdeHelper([u8; 32]);
 
 impl Drop for SerdeHelper {
@@ -174,6 +174,71 @@ impl Drop for SerdeHelper {
 }
 
 impl zeroize::ZeroizeOnDrop for SerdeHelper {}
+
+/// Reads the encoding a derived `Deserialize` reads, a newtype around a 32-tuple of bytes, and
+/// writes each byte straight into the `SerdeHelper` that wipes it.
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for SerdeHelper {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_newtype_struct("SerdeHelper", SerdeHelperVisitor)
+    }
+}
+
+#[cfg(feature = "serde")]
+struct SerdeHelperVisitor;
+
+#[cfg(feature = "serde")]
+impl<'de> serde::de::Visitor<'de> for SerdeHelperVisitor {
+    type Value = SerdeHelper;
+
+    fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        f.write_str("tuple struct SerdeHelper")
+    }
+
+    fn visit_newtype_struct<D: serde::Deserializer<'de>>(
+        self,
+        d: D,
+    ) -> Result<SerdeHelper, D::Error> {
+        serde::de::DeserializeSeed::deserialize(SeedVisitor, d)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<SerdeHelper, A::Error> {
+        seq.next_element_seed(SeedVisitor)?
+            .ok_or_else(|| serde::de::Error::invalid_length(0, &self))
+    }
+}
+
+#[cfg(feature = "serde")]
+#[derive(Clone, Copy)]
+struct SeedVisitor;
+
+#[cfg(feature = "serde")]
+impl<'de> serde::de::DeserializeSeed<'de> for SeedVisitor {
+    type Value = SerdeHelper;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<SerdeHelper, D::Error> {
+        d.deserialize_tuple(32, self)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::de::Visitor<'de> for SeedVisitor {
+    type Value = SerdeHelper;
+
+    fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        f.write_str("an array of length 32")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<SerdeHelper, A::Error> {
+        let mut helper = SerdeHelper([0u8; 32]);
+        for (i, byte) in helper.0.iter_mut().enumerate() {
+            *byte = seq
+                .next_element()?
+                .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
+        }
+        Ok(helper)
+    }
+}
 
 impl From<SerdeHelper> for SigningKey {
     fn from(helper: SerdeHelper) -> SigningKey {
@@ -235,18 +300,28 @@ mod tests {
         secret
     }
 
-    /// Whether `secret` is in `value`'s storage before and after dropping it in place.
-    fn residue<T>(value: T, secret: &[u8]) -> (bool, bool) {
+    fn reversed(secret: &[u8; 32]) -> [u8; 32] {
+        let mut reversed = *secret;
+        reversed.reverse();
+        reversed
+    }
+
+    /// Whether `secret`, in either byte order, is in `value`'s storage before and after dropping
+    /// it in place.
+    fn residue<T>(value: T, secret: &[u8; 32]) -> (bool, bool) {
         let mut slot = MaybeUninit::<T>::zeroed();
         slot.write(value);
+        let needles = [*secret, reversed(secret)];
         let holds = |slot: &MaybeUninit<T>| {
             let base = slot.as_ptr().cast::<u8>();
-            (0..=size_of::<T>() - secret.len()).any(|start| {
-                secret
-                    .iter()
-                    .enumerate()
-                    // SAFETY: every offset is inside `slot`.
-                    .all(|(i, b)| unsafe { base.add(start + i).read_volatile() } == *b)
+            needles.iter().any(|needle| {
+                (0..=size_of::<T>() - needle.len()).any(|start| {
+                    needle
+                        .iter()
+                        .enumerate()
+                        // SAFETY: every offset is inside `slot`.
+                        .all(|(i, b)| unsafe { base.add(start + i).read_volatile() } == *b)
+                })
             })
         };
         let before = holds(&slot);
@@ -268,6 +343,64 @@ mod tests {
     fn test_residue_detects_unwiped_secret() {
         let secret = secret();
         assert_eq!(residue(secret, &secret), (true, true));
+        assert_eq!(residue(reversed(&secret), &secret), (true, true));
+    }
+
+    /// Whether `output` renders `secret`, in either byte order, as lower- or upper-case hex or as
+    /// a decimal byte list, whitespace ignored.
+    #[cfg(feature = "std")]
+    fn renders(output: &str, secret: &[u8; 32]) -> bool {
+        let output: String = output.chars().filter(|c| !c.is_whitespace()).collect();
+        [*secret, reversed(secret)].iter().any(|needle| {
+            let list = needle
+                .iter()
+                .map(|b| b.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            [hex::encode(needle), hex::encode_upper(needle), list]
+                .iter()
+                .any(|rendering| output.contains(rendering.as_str()))
+        })
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn test_signing_key_debug_renders_no_secret() {
+        let sk = SigningKey::from(secret());
+        let secrets = [sk.seed, sk.s.to_bytes(), sk.prefix];
+        for output in [format!("{:?}", sk), format!("{:#?}", sk)] {
+            for secret in &secrets {
+                assert!(!renders(&output, secret), "{}", output);
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn test_renders_detects_rendered_secret() {
+        let secret = secret();
+        let backwards = reversed(&secret);
+        for output in [
+            format!("seed: {}", hex::encode(secret)),
+            format!("seed: {}", hex::encode_upper(backwards)),
+            format!("{:?}", secret),
+            format!("{:#?}", backwards),
+        ] {
+            assert!(renders(&output, &secret), "{}", output);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn test_serde_helper_reads_its_serialized_form() {
+        let secret = secret();
+        let bytes = bincode::serialize(&SerdeHelper(secret)).unwrap();
+        assert_eq!(bytes, secret);
+        assert_eq!(
+            bincode::deserialize::<SerdeHelper>(&bytes).unwrap().0,
+            secret
+        );
+        assert!(bincode::deserialize::<SerdeHelper>(&bytes[..31]).is_err());
     }
 
     #[test]
